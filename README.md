@@ -1,6 +1,5 @@
 # WeeklyFlow
-
-WeeklyFlow is a private placement preparation tracker for one mentor and one student. It uses a React, TypeScript and Vite client, an Express API, and Supabase Postgres persistence.
+WeeklyFlow is a private preparation tracker for one mentor and one student. It uses a React, TypeScript and Vite client, an Express API, and Supabase Postgres persistence.
 
 ## Requirements
 
