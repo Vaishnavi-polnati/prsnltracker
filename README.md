@@ -29,7 +29,7 @@ Public account registration is intentionally unavailable. The seed command refus
 
 ## Deployment
 
-Set the environment variables from `.env.example`, and deploy the API and static frontend. Set `CLIENT_ORIGIN` to the exact frontend origin. Use HTTPS in production so session cookies can use `Secure` and `SameSite=None`. Configure `APP_TIMEZONE` to the timezone used for date handling. Keep the Supabase secret key server-side; never put it in Vite-prefixed environment variables. The frontend build is in `dist/`; the API listens on `PORT`.
+Deploy the repository as a Vercel project. Vercel builds the Vite frontend from `dist/` and exposes the Express API through `api/index.ts`; no separate backend service is required. Set `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `SESSION_SECRET`, `CLIENT_ORIGIN`, the mentor/student account variables, and `APP_TIMEZONE` in Vercel. Use HTTPS in production. Keep the Supabase secret key server-side and never put it in Vite-prefixed environment variables. Run `pnpm seed` once locally with the production Supabase variables to create the configured accounts.
 
 ## Current feature coverage
 
