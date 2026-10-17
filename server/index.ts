@@ -14,7 +14,7 @@ import { db, result, clientRow } from './db.js';
 
 const app = express();
 const server = http.createServer(app);
-const origin = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
+const origin = process.env.CLIENT_ORIGIN || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:5173');
 const io = new Server(server, { cors: { origin, credentials: true } });
 const secret = process.env.SESSION_SECRET;
 if (!secret && process.env.NODE_ENV === 'production') throw new Error('SESSION_SECRET is required in production');
@@ -322,4 +322,5 @@ app.use((err: Error & { code?: string }, _req: express.Request, res: express.Res
   res.status(500).json({ error: 'Something went wrong. Please try again.' });
 });
 const port = Number(process.env.PORT || 4000);
-app.listen(port, () => console.log(`WeeklyFlow API listening on ${port}`));
+export default app;
+if (!process.env.VERCEL) app.listen(port, () => console.log(`WeeklyFlow API listening on ${port}`));
