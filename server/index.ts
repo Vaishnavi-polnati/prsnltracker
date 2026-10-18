@@ -190,19 +190,21 @@ app.get('/api/tasks', safe(async (req, res) => {
   res.json(tasks.map(t => ({ ...row(t), progress: t.progress || fallbackProgress.get(t.id) || 1, board: boardById.get(t.board_id) || t.board_id, column: columnById.get(t.column_id) || null, feedbackUnread: unreadByTask.get(t.id) || 0 })));
 }));
 app.post('/api/tasks', mentor, validate(z.object({ title: z.string().min(1).max(180), description: z.string().optional(), dueDate: z.string().optional(), priority: z.enum(['Low', 'Medium', 'High']).optional(), category: z.enum(['AI', 'Java DSA', 'Project', 'Revision']).optional(), board: z.string().uuid(), columnId: z.string().optional(), tags: z.array(z.string()).optional(), resources: z.array(z.string()).optional() })), safe(async (req: Req, res) => {
-  const targetBoard = await result<any>(db.from('weekly_boards').select('week_start').eq('id', req.body.board).maybeSingle());
+  const [targetBoard, duplicate, modern] = await Promise.all([
+    result<any>(db.from('weekly_boards').select('week_start').eq('id', req.body.board).maybeSingle()),
+    result<any>(db.from('tasks').select('*').eq('board_id', req.body.board).eq('title', req.body.title).maybeSingle()),
+    hasWorkspaceSchema(),
+  ]);
   if (!targetBoard) return res.status(404).json({ error: 'Week not found.' });
   if (isHistoricalWeek(targetBoard.week_start)) return res.status(409).json({ error: 'Past weeks are locked and cannot receive new tasks.' });
-  const duplicate = await result<any>(db.from('tasks').select('*').eq('board_id', req.body.board).eq('title', req.body.title).maybeSingle());
   if (duplicate) return res.json(row(duplicate));
   const base = { title: req.body.title, description: req.body.description, due_date: req.body.dueDate || null, priority: req.body.priority || 'Medium', category: req.body.category || 'Project', board_id: req.body.board, status: 'To Do', tags: req.body.tags || [], resources: req.body.resources || [], created_by: req.user!.id };
-  const modern = await hasWorkspaceSchema();
   const first = modern ? await result<any>(db.from('kanban_columns').select('id').eq('is_active', true).order('position').limit(1).single()) : null;
   const insertPayload: any = modern ? { ...base, column_id: req.body.columnId || first.id, progress: 1, sent_at: new Date().toISOString() } : base;
   const data = await result<any>(db.from('tasks').insert(insertPayload).select().single());
-  await result(db.from('activity_logs').insert({ task_id: data.id, actor: req.user!.name, action: 'created', detail: data.title }));
   io.emit('task:update', row(data));
   res.status(201).json(row(data));
+  void result(db.from('activity_logs').insert({ task_id: data.id, actor: req.user!.name, action: 'created', detail: data.title })).catch(error => console.error('Task activity log failed:', error));
 }));
 app.patch('/api/tasks/:id', safe(async (req: Req, res) => {
   const schema = z.object({ title: z.string().min(1).optional(), description: z.string().optional(), status: z.enum(['To Do', 'In Progress', 'Completed']).optional(), columnId: z.string().optional(), progress: z.number().int().min(1).max(10).optional(), reviewStatus: z.enum(['Not Submitted', 'Submitted for Review', 'Changes Requested', 'Approved']).optional(), priority: z.enum(['Low', 'Medium', 'High']).optional(), category: z.enum(['AI', 'Java DSA', 'Project', 'Revision']).optional(), dueDate: z.string().optional(), notes: z.string().optional(), githubUrl: z.string().url().optional() });
