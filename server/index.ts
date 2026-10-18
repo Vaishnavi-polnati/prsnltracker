@@ -31,10 +31,11 @@ const dateInZone = (date = new Date()) => new Intl.DateTimeFormat('en-CA', {
 }).format(date);
 const weekStart = (date: string) => {
   const d = new Date(`${date}T00:00:00Z`);
-  d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
+  d.setUTCDate(d.getUTCDate() - d.getUTCDay());
   return d.toISOString().slice(0, 10);
 };
 const today = () => dateInZone();
+const isHistoricalWeek = (start: string) => start < weekStart(today());
 function makeToken(payload: object) {
   const body = Buffer.from(JSON.stringify({ ...payload, exp: Date.now() + 7 * 864e5 })).toString('base64url');
   return `${body}.${crypto.createHmac('sha256', key).update(body).digest('base64url')}`;
@@ -104,14 +105,21 @@ app.get('/api/boards', safe(async (_req, res) => {
   res.json(rows(data));
 }));
 app.post('/api/boards', mentor, validate(z.object({ weekStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), label: z.string().min(1).max(100).optional() })), safe(async (req, res) => {
+  if (isHistoricalWeek(req.body.weekStart)) return res.status(409).json({ error: 'Past weeks are locked and cannot be created or changed.' });
   const data = await result<any>(db.from('weekly_boards').upsert({ week_start: req.body.weekStart, label: req.body.label || `Week of ${req.body.weekStart}` }, { onConflict: 'week_start' }).select().single());
   res.status(201).json(row(data));
 }));
 app.patch('/api/boards/:id', mentor, validate(z.object({ weekStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), label: z.string().min(1).max(100).optional() })), safe(async (req, res) => {
+  const existing = await result<any>(db.from('weekly_boards').select('week_start').eq('id', req.params.id).maybeSingle());
+  if (!existing) return res.status(404).json({ error: 'Week not found.' });
+  if (isHistoricalWeek(existing.week_start) || (req.body.weekStart && isHistoricalWeek(req.body.weekStart))) return res.status(409).json({ error: 'Past weeks are locked and cannot be edited.' });
   const update: Record<string, string> = {}; if (req.body.weekStart) update.week_start = req.body.weekStart; if (req.body.label) update.label = req.body.label;
   res.json(row(await result<any>(db.from('weekly_boards').update(update).eq('id', req.params.id).select().single())));
 }));
 app.delete('/api/boards/:id', mentor, safe(async (req, res) => {
+  const board = await result<any>(db.from('weekly_boards').select('week_start').eq('id', req.params.id).maybeSingle());
+  if (!board) return res.status(404).json({ error: 'Week not found.' });
+  if (isHistoricalWeek(board.week_start)) return res.status(409).json({ error: 'Past weeks are locked and cannot be deleted.' });
   const count = await result<any[]>(db.from('tasks').select('id').eq('board_id', req.params.id).limit(1));
   if (count.length) return res.status(409).json({ error: 'Move or remove this week’s tasks before deleting the week.' });
   await result(db.from('weekly_boards').delete().eq('id', req.params.id)); res.json({ ok: true });
@@ -173,6 +181,9 @@ app.get('/api/tasks', safe(async (req, res) => {
   res.json(tasks.map(t => ({ ...row(t), progress: t.progress || fallbackProgress.get(t.id) || 1, board: boardById.get(t.board_id) || t.board_id, column: columnById.get(t.column_id) || null })));
 }));
 app.post('/api/tasks', mentor, validate(z.object({ title: z.string().min(1).max(180), description: z.string().optional(), dueDate: z.string().optional(), priority: z.enum(['Low', 'Medium', 'High']).optional(), category: z.enum(['AI', 'Java DSA', 'Project', 'Revision']).optional(), board: z.string().uuid(), columnId: z.string().optional(), tags: z.array(z.string()).optional(), resources: z.array(z.string()).optional() })), safe(async (req: Req, res) => {
+  const targetBoard = await result<any>(db.from('weekly_boards').select('week_start').eq('id', req.body.board).maybeSingle());
+  if (!targetBoard) return res.status(404).json({ error: 'Week not found.' });
+  if (isHistoricalWeek(targetBoard.week_start)) return res.status(409).json({ error: 'Past weeks are locked and cannot receive new tasks.' });
   const duplicate = await result<any>(db.from('tasks').select('*').eq('board_id', req.body.board).eq('title', req.body.title).maybeSingle());
   if (duplicate) return res.json(row(duplicate));
   const base = { title: req.body.title, description: req.body.description, due_date: req.body.dueDate || null, priority: req.body.priority || 'Medium', category: req.body.category || 'Project', board_id: req.body.board, status: 'To Do', tags: req.body.tags || [], resources: req.body.resources || [], created_by: req.user!.id };
@@ -247,8 +258,9 @@ app.get('/api/dashboard', safe(async (_req, res) => {
 }));
 app.get('/api/calendar', safe(async (req, res) => {
   const from = String(req.query.from || '2000-01-01'); const to = String(req.query.to || '2100-01-01');
-  const [tasks, checks, sessions, boards] = await Promise.all([result<any[]>(db.from('tasks').select('*').gte('due_date', from).lte('due_date', to)), result<any[]>(db.from('daily_checkins').select('*').gte('date', from).lte('date', to)), result<any[]>(db.from('study_sessions').select('*').gte('date', from).lte('date', to)), result<any[]>(db.from('weekly_boards').select('*').gte('week_start', from).lte('week_start', to))]);
-  res.json([...tasks.map(t => ({ id: t.id, kind: 'task', date: t.due_date, title: t.title, status: t.status, overdue: t.due_date < today() && t.status !== 'Completed', taskId: t.id })), ...checks.map(c => ({ id: c.id, kind: 'checkin', date: c.date, title: 'Daily check-in' })), ...sessions.map(s => ({ id: s.id, kind: 'study', date: s.date, title: s.topic || 'Study session' })), ...boards.map(b => ({ id: b.id, kind: 'week', date: b.week_start, title: b.label }))]);
+  const [tasks, checks, sessions, boards] = await Promise.all([result<any[]>(db.from('tasks').select('*, weekly_boards(week_start)').order('created_at', { ascending: true })), result<any[]>(db.from('daily_checkins').select('*').gte('date', from).lte('date', to)), result<any[]>(db.from('study_sessions').select('*').gte('date', from).lte('date', to)), result<any[]>(db.from('weekly_boards').select('*').gte('week_start', from).lte('week_start', to))]);
+  const taskEvents = tasks.map(t => ({ ...t, calendarDate: t.due_date || t.weekly_boards?.week_start })).filter(t => t.calendarDate >= from && t.calendarDate <= to);
+  res.json([...taskEvents.map(t => ({ id: t.id, kind: 'task', date: t.calendarDate, title: t.title, status: t.status, overdue: t.due_date && t.due_date < today() && t.status !== 'Completed', taskId: t.id })), ...checks.map(c => ({ id: c.id, kind: 'checkin', date: c.date, title: 'Daily check-in' })), ...sessions.map(s => ({ id: s.id, kind: 'study', date: s.date, title: s.topic || 'Study session' })), ...boards.map(b => ({ id: b.id, kind: 'week', date: b.week_start, title: b.label }))]);
 }));
 app.get('/api/checkins', safe(async (_req, res) => {
   res.json(rows(await result<any[]>(db.from('daily_checkins').select('*').order('date', { ascending: false }).limit(400))));
