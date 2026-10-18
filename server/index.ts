@@ -178,7 +178,16 @@ app.get('/api/tasks', safe(async (req, res) => {
   const columnIds = [...new Set(tasks.map(t => t.column_id).filter(Boolean))];
   const columnsData = await hasWorkspaceSchema() && columnIds.length ? await result<any[]>(db.from('kanban_columns').select('*').in('id', columnIds)) : fallbackColumns;
   const columnById = new Map(columnsData.map(c => [c.id, row(c)]));
-  res.json(tasks.map(t => ({ ...row(t), progress: t.progress || fallbackProgress.get(t.id) || 1, board: boardById.get(t.board_id) || t.board_id, column: columnById.get(t.column_id) || null })));
+  let unreadByTask = new Map<string, number>();
+  try {
+    if (tasks.length) {
+      const feedback = await result<any[]>(db.from('task_feedback').select('id,task_id,author_id').in('task_id', tasks.map(t => t.id)));
+      const reads = feedback.length ? await result<any[]>(db.from('feedback_reads').select('feedback_id').eq('user_id', req.user!.id).in('feedback_id', feedback.map(item => item.id))) : [];
+      const readIds = new Set(reads.map(item => item.feedback_id));
+      for (const item of feedback) if (item.author_id !== req.user!.id && !readIds.has(item.id)) unreadByTask.set(item.task_id, (unreadByTask.get(item.task_id) || 0) + 1);
+    }
+  } catch { /* Feedback migration may not be applied during a rolling deployment. */ }
+  res.json(tasks.map(t => ({ ...row(t), progress: t.progress || fallbackProgress.get(t.id) || 1, board: boardById.get(t.board_id) || t.board_id, column: columnById.get(t.column_id) || null, feedbackUnread: unreadByTask.get(t.id) || 0 })));
 }));
 app.post('/api/tasks', mentor, validate(z.object({ title: z.string().min(1).max(180), description: z.string().optional(), dueDate: z.string().optional(), priority: z.enum(['Low', 'Medium', 'High']).optional(), category: z.enum(['AI', 'Java DSA', 'Project', 'Revision']).optional(), board: z.string().uuid(), columnId: z.string().optional(), tags: z.array(z.string()).optional(), resources: z.array(z.string()).optional() })), safe(async (req: Req, res) => {
   const targetBoard = await result<any>(db.from('weekly_boards').select('week_start').eq('id', req.body.board).maybeSingle());
@@ -225,6 +234,36 @@ app.delete('/api/tasks/:id', mentor, safe(async (req, res) => {
 }));
 app.get('/api/tasks/:id/activity', safe(async (req, res) => {
   res.json(rows(await result<any[]>(db.from('activity_logs').select('*').eq('task_id', req.params.id).order('created_at', { ascending: false }))));
+}));
+async function feedbackTask(req: Req, res: express.Response) {
+  const task = await result<any>(db.from('tasks').select('id, sent_at, is_carried_over, weekly_boards(week_start)').eq('id', req.params.id).maybeSingle());
+  if (!task) { res.status(404).json({ error: 'Task not found.' }); return null; }
+  if (req.user!.role === 'student' && !task.sent_at && !task.is_carried_over) { res.status(403).json({ error: 'This task is not available yet.' }); return null; }
+  if (task.weekly_boards?.week_start < weekStart(today())) { res.status(409).json({ error: 'Historical weekly boards are read-only.' }); return null; }
+  return task;
+}
+app.get('/api/tasks/:id/feedback', safe(async (req: Req, res) => {
+  if (!await feedbackTask(req, res)) return;
+  const feedback = await result<any[]>(db.from('task_feedback').select('*').eq('task_id', req.params.id).order('created_at', { ascending: true }));
+  const authorIds = [...new Set(feedback.map(item => item.author_id))];
+  const users = authorIds.length ? await result<any[]>(db.from('app_users').select('id,name,role').in('id', authorIds)) : [];
+  const authors = new Map(users.map(user => [user.id, user]));
+  const reads = feedback.length ? await result<any[]>(db.from('feedback_reads').select('feedback_id').eq('user_id', req.user!.id).in('feedback_id', feedback.map(item => item.id))) : [];
+  const readIds = new Set(reads.map(item => item.feedback_id));
+  res.json({ comments: feedback.map(item => ({ ...row(item), authorName: authors.get(item.author_id)?.name || 'User', authorRole: authors.get(item.author_id)?.role || 'student', unread: item.author_id !== req.user!.id && !readIds.has(item.id) })), unreadCount: feedback.filter(item => item.author_id !== req.user!.id && !readIds.has(item.id)).length });
+}));
+app.post('/api/tasks/:id/feedback', validate(z.object({ body: z.string().trim().min(1).max(2000) })), safe(async (req: Req, res) => {
+  if (!await feedbackTask(req, res)) return;
+  const item = await result<any>(db.from('task_feedback').insert({ task_id: req.params.id, author_id: req.user!.id, body: req.body.body }).select().single());
+  await result(db.from('activity_logs').insert({ task_id: req.params.id, actor: req.user!.name, action: 'feedback_added', detail: req.body.body.slice(0, 180) }));
+  res.status(201).json(row(item));
+}));
+app.post('/api/tasks/:id/feedback/read', safe(async (req: Req, res) => {
+  if (!await feedbackTask(req, res)) return;
+  const feedback = await result<any[]>(db.from('task_feedback').select('id,author_id').eq('task_id', req.params.id));
+  const unread = feedback.filter(item => item.author_id !== req.user!.id).map(item => ({ feedback_id: item.id, user_id: req.user!.id }));
+  if (unread.length) await result(db.from('feedback_reads').upsert(unread, { onConflict: 'feedback_id,user_id', ignoreDuplicates: false }));
+  res.json({ ok: true });
 }));
 app.post('/api/tasks/:id/carryover', mentor, safe(async (req: Req, res) => {
   const source = await result<any>(db.from('tasks').select('*, weekly_boards(week_start)').eq('id', req.params.id).single());
