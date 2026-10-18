@@ -1,8 +1,8 @@
 # WeeklyFlow
 WeeklyFlow is a private preparation tracker for one mentor and one student. It uses a React, TypeScript and Vite client, an Express API, and Supabase Postgres persistence.
-
+hi
 ## Requirements
-
+jnhbgvfcdxszasxdcfvgbhnjmhngbfvdsx
 - Node.js 20 or later and pnpm
 - A Supabase project (the database is hosted by Supabase)
 
